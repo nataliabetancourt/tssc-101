@@ -14,14 +14,19 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        const snap = await getDoc(doc(db, "users", u.uid));
-        setProfile(snap.exists() ? snap.data() : null);
-      } else {
+      try {
+        setUser(u);
+        if (u) {
+          const snap = await getDoc(doc(db, "users", u.uid));
+          setProfile(snap.exists() ? snap.data() : null);
+        } else {
+          setProfile(null);
+        }
+      } catch {
         setProfile(null);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
     return () => unsub();
   }, []);

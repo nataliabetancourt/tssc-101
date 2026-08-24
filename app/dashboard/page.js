@@ -5,12 +5,23 @@ import Link from "next/link";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import LogoutButton from "@/components/LogoutButton";
 import YouTubePlayer from "@/components/YouTubePlayer";
+import LessonQuiz from "@/components/LessonQuiz";
 import { useAuth } from "@/context/AuthContext";
-import { loadCourse, loadProgress, saveLessonProgress } from "@/lib/course";
+import {
+  loadCourse,
+  loadProgress,
+  loadQuestions,
+  saveLessonProgress,
+  saveSeenLessonCount,
+} from "@/lib/course";
 import {
   COURSE_ID,
-  countWatchCompleted,
+  countLessonsCompleted,
   getLessonStatus,
+  getNewLessons,
+  isCourseComplete,
+  lessonHasQuiz,
+  mergeLessonProgress,
 } from "@/lib/progress";
 
 export default function DashboardPage() {
@@ -27,12 +38,17 @@ function CourseHome() {
   const [lessons, setLessons] = useState([]);
   const [progress, setProgress] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [questionsLoading, setQuestionsLoading] = useState(false);
+  const [stage, setStage] = useState("video");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const lastSaveRef = useRef(0);
   const progressRef = useRef(progress);
+  const lessonsRef = useRef(lessons);
   const latestUpdateRef = useRef(null);
   progressRef.current = progress;
+  lessonsRef.current = lessons;
 
   useEffect(() => {
     let cancelled = false;
@@ -74,17 +90,13 @@ function CourseHome() {
       cancelled = true;
       const pending = latestUpdateRef.current;
       if (pending) {
+        const lesson = lessonsRef.current.find((item) => item.id === pending.lessonId);
         const previous = progressRef.current?.lessons?.[pending.lessonId];
-        saveLessonProgress(user.uid, pending.lessonId, {
-          watchedPercent: Math.max(
-            previous?.watchedPercent ?? 0,
-            pending.update.watchedPercent,
-          ),
-          watchCompleted: Boolean(
-            previous?.watchCompleted || pending.update.watchCompleted,
-          ),
-          lastPositionSeconds: pending.update.lastPositionSeconds,
-        }).catch(() => {});
+        saveLessonProgress(
+          user.uid,
+          pending.lessonId,
+          mergeLessonProgress(previous, pending.update, lesson),
+        ).catch(() => {});
       }
     };
   }, [user.uid]);
@@ -101,30 +113,90 @@ function CourseHome() {
     watchedPercent: 0,
     watchCompleted: false,
     lastPositionSeconds: 0,
+    quizPassed: false,
+    lessonCompleted: false,
   };
-  const completedCount = countWatchCompleted(lessons, progress);
-  const coursePercent = lessons.length
-    ? Math.round((completedCount / lessons.length) * 100)
+  const completedCount = countLessonsCompleted(lessons, progress);
+  const requiredCount = course?.lessonCount ?? lessons.length;
+  const coursePercent = requiredCount
+    ? Math.round((completedCount / requiredCount) * 100)
     : 0;
+  const courseComplete = isCourseComplete(course, lessons, progress);
+  const newLessons = getNewLessons(lessons, progress);
+  const showCourseNewBadge = newLessons.length > 0 && !courseComplete;
+  const showQuiz =
+    selectedLesson &&
+    selectedProgress.watchCompleted &&
+    lessonHasQuiz(selectedLesson) &&
+    selectedProgress.quizPassed !== true;
+  const showingQuiz = showQuiz && stage === "quiz";
+
+  useEffect(() => {
+    const lesson = lessonsRef.current.find((item) => item.id === selectedId);
+    const data = progressRef.current?.lessons?.[selectedId];
+    if (
+      data?.watchCompleted &&
+      lessonHasQuiz(lesson) &&
+      data.quizPassed !== true
+    ) {
+      setStage("quiz");
+    } else {
+      setStage("video");
+    }
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!showQuiz || !selectedId) {
+      setQuestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    setQuestionsLoading(true);
+    loadQuestions(selectedId)
+      .then((nextQuestions) => {
+        if (!cancelled) setQuestions(nextQuestions);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err.message ?? "Could not load the quiz.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setQuestionsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, showQuiz]);
+
+  useEffect(() => {
+    if (!courseComplete) return;
+    if ((progress?.seenLessonCount ?? 0) >= lessons.length) return;
+
+    saveSeenLessonCount(user.uid, lessons.length)
+      .then(() => {
+        setProgress((current) =>
+          current
+            ? { ...current, seenLessonCount: lessons.length }
+            : current,
+        );
+      })
+      .catch(() => {});
+  }, [courseComplete, lessons.length, progress?.seenLessonCount, user.uid]);
 
   const persistProgress = useCallback(
-    async (lessonId, nextLessonProgress) => {
+    async (lessonId, patch) => {
+      const lesson = lessonsRef.current.find((item) => item.id === lessonId);
       const previous = progressRef.current?.lessons?.[lessonId];
-      const merged = {
-        watchedPercent: Math.max(
-          previous?.watchedPercent ?? 0,
-          nextLessonProgress.watchedPercent,
-        ),
-        watchCompleted: Boolean(
-          previous?.watchCompleted || nextLessonProgress.watchCompleted,
-        ),
-        lastPositionSeconds: nextLessonProgress.lastPositionSeconds,
-      };
+      const merged = mergeLessonProgress(previous, patch, lesson);
 
       setProgress((current) => ({
         courseId: COURSE_ID,
         status: "in_progress",
         startedAt: current?.startedAt,
+        seenLessonCount: current?.seenLessonCount,
         lessons: {
           ...(current?.lessons ?? {}),
           [lessonId]: merged,
@@ -141,8 +213,9 @@ function CourseHome() {
       if (!selectedId) return;
       const now = Date.now();
       const previous = progressRef.current?.lessons?.[selectedId];
-      const completedNow =
-        update.watchCompleted && !previous?.watchCompleted;
+      const lesson = lessonsRef.current.find((item) => item.id === selectedId);
+      const merged = mergeLessonProgress(previous, update, lesson);
+      const completedNow = merged.watchCompleted && !previous?.watchCompleted;
       const due = now - lastSaveRef.current > 3000;
       latestUpdateRef.current = { lessonId: selectedId, update };
 
@@ -151,18 +224,10 @@ function CourseHome() {
           courseId: COURSE_ID,
           status: "in_progress",
           startedAt: current?.startedAt,
+          seenLessonCount: current?.seenLessonCount,
           lessons: {
             ...(current?.lessons ?? {}),
-            [selectedId]: {
-              watchedPercent: Math.max(
-                previous?.watchedPercent ?? 0,
-                update.watchedPercent,
-              ),
-              watchCompleted: Boolean(
-                previous?.watchCompleted || update.watchCompleted,
-              ),
-              lastPositionSeconds: update.lastPositionSeconds,
-            },
+            [selectedId]: merged,
           },
         }));
         return;
@@ -175,6 +240,16 @@ function CourseHome() {
     },
     [persistProgress, selectedId],
   );
+
+  async function handleQuizPass() {
+    if (!selectedId) return;
+    await persistProgress(selectedId, {
+      quizPassed: true,
+      watchCompleted: true,
+      watchedPercent: selectedProgress.watchedPercent ?? 100,
+      lastPositionSeconds: selectedProgress.lastPositionSeconds ?? 0,
+    });
+  }
 
   if (loading) {
     return (
@@ -207,17 +282,29 @@ function CourseHome() {
           <LogoutButton className="min-h-10 shrink-0 px-3 text-sm" />
         </header>
 
+        {showCourseNewBadge ? (
+          <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900">
+            New lesson added
+          </p>
+        ) : null}
+
+        {courseComplete ? (
+          <p className="rounded-lg bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
+            ✓ Course complete
+          </p>
+        ) : null}
+
         <section>
           <div className="mb-2 flex items-center justify-between text-sm">
             <span className="font-medium">Course progress</span>
             <span className="text-gray-600">
-              {completedCount} of {lessons.length} watched
+              {completedCount} of {requiredCount} complete
             </span>
           </div>
           <div className="h-2 overflow-hidden rounded-full bg-gray-200">
             <div
               className="h-full rounded-full bg-gray-900"
-              style={{ width: `${coursePercent}%` }}
+              style={{ width: `${Math.min(100, coursePercent)}%` }}
             />
           </div>
         </section>
@@ -225,43 +312,91 @@ function CourseHome() {
         {selectedLesson && selectedStatus !== "locked" ? (
           <section className="flex flex-col gap-3">
             <h2 className="text-lg font-semibold">{selectedLesson.title}</h2>
-            <YouTubePlayer
-              key={selectedLesson.id}
-              videoId={selectedLesson.youtubeId}
-              durationSeconds={selectedLesson.durationSeconds || 1}
-              completed={Boolean(selectedProgress.watchCompleted)}
-              startSeconds={selectedProgress.lastPositionSeconds ?? 0}
-              initialMaxSeconds={
-                ((selectedProgress.watchedPercent ?? 0) / 100) *
-                (selectedLesson.durationSeconds || 1)
-              }
-              onProgress={handleProgress}
-            />
-            <div>
-              <div className="mb-1 flex items-center justify-between text-sm">
-                <span>Video</span>
-                <span className="text-gray-600">
-                  {Math.round(selectedProgress.watchedPercent ?? 0)}% watched
-                </span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-gray-200">
-                <div
-                  className="h-full rounded-full bg-gray-900"
-                  style={{
-                    width: `${Math.min(100, selectedProgress.watchedPercent ?? 0)}%`,
+            {!showingQuiz ? (
+              <>
+                <YouTubePlayer
+                  key={selectedLesson.id}
+                  videoId={selectedLesson.youtubeId}
+                  durationSeconds={selectedLesson.durationSeconds || 1}
+                  completed={Boolean(selectedProgress.watchCompleted)}
+                  startSeconds={
+                    selectedProgress.watchCompleted
+                      ? 0
+                      : (selectedProgress.lastPositionSeconds ?? 0)
+                  }
+                  initialMaxSeconds={
+                    ((selectedProgress.watchedPercent ?? 0) / 100) *
+                    (selectedLesson.durationSeconds || 1)
+                  }
+                  onProgress={handleProgress}
+                  onEnded={() => {
+                    if (
+                      lessonHasQuiz(selectedLesson) &&
+                      selectedProgress.quizPassed !== true
+                    ) {
+                      setStage("quiz");
+                    }
                   }}
                 />
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-sm">
+                    <span>Video</span>
+                    <span className="text-gray-600">
+                      {Math.round(selectedProgress.watchedPercent ?? 0)}% watched
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full rounded-full bg-gray-900"
+                      style={{
+                        width: `${Math.min(100, selectedProgress.watchedPercent ?? 0)}%`,
+                      }}
+                    />
+                  </div>
+                  {!selectedProgress.watchCompleted ? (
+                    <p className="mt-2 text-sm text-gray-600">
+                      Watch the video. The quiz starts when it ends.
+                    </p>
+                  ) : selectedProgress.lessonCompleted ? (
+                    <p className="mt-2 text-sm text-green-700">
+                      Lesson complete. You can replay this video anytime.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-sm text-gray-600">
+                      Watch complete. Continue to the quiz when you are ready.
+                    </p>
+                  )}
+                </div>
+                {showQuiz ? (
+                  <button
+                    type="button"
+                    onClick={() => setStage("quiz")}
+                    className="min-h-12 w-full rounded-lg bg-gray-900 text-base font-medium text-white"
+                  >
+                    Continue to quiz
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+
+            {showingQuiz && questionsLoading && questions.length === 0 ? (
+              <p className="text-sm text-gray-600">Loading quiz…</p>
+            ) : null}
+            {showQuiz && questions.length > 0 ? (
+              <div className={showingQuiz ? "" : "hidden"}>
+                <LessonQuiz
+                  key={selectedLesson.id}
+                  questions={questions}
+                  onPass={handleQuizPass}
+                  onBackToVideo={() => setStage("video")}
+                />
               </div>
-              {!selectedProgress.watchCompleted ? (
-                <p className="mt-2 text-sm text-gray-600">
-                  Watch about 90% to unlock the next lesson.
-                </p>
-              ) : (
-                <p className="mt-2 text-sm text-green-700">
-                  Watch complete. You can replay this lesson anytime.
-                </p>
-              )}
-            </div>
+            ) : null}
+            {showingQuiz && !questionsLoading && questions.length === 0 ? (
+              <p className="text-sm text-gray-600">
+                No quiz questions found for this lesson.
+              </p>
+            ) : null}
           </section>
         ) : null}
 
@@ -271,6 +406,7 @@ function CourseHome() {
             const status = getLessonStatus(lesson, lessons, progress);
             const watched = progress?.lessons?.[lesson.id]?.watchedPercent ?? 0;
             const selected = lesson.id === selectedId;
+            const isNew = newLessons.some((item) => item.id === lesson.id);
 
             return (
               <button
@@ -288,9 +424,15 @@ function CourseHome() {
                   <span className="font-medium">
                     {lesson.order}. {lesson.title}
                   </span>
-                  {status !== "locked" ? (
+                  {isNew ? (
+                    <span className="mt-0.5 block text-sm font-medium text-amber-800">
+                      New lesson added
+                    </span>
+                  ) : status !== "locked" ? (
                     <span className="mt-0.5 block text-sm text-gray-600">
-                      {Math.round(watched)}% watched
+                      {status === "quiz"
+                        ? "Quiz ready"
+                        : `${Math.round(watched)}% watched`}
                     </span>
                   ) : null}
                 </span>
@@ -299,7 +441,9 @@ function CourseHome() {
                     ? "Done"
                     : status === "locked"
                       ? "Locked"
-                      : "Watch"}
+                      : status === "quiz"
+                        ? "Quiz"
+                        : "Watch"}
                 </span>
               </button>
             );
@@ -326,10 +470,13 @@ function CourseHome() {
 }
 
 function pickDefaultLesson(lessons, progress) {
+  const quizReady = lessons.find(
+    (lesson) => getLessonStatus(lesson, lessons, progress) === "quiz",
+  );
+  if (quizReady) return quizReady.id;
+
   const firstIncomplete = lessons.find(
-    (lesson) =>
-      getLessonStatus(lesson, lessons, progress) === "unlocked" &&
-      !progress?.lessons?.[lesson.id]?.watchCompleted,
+    (lesson) => getLessonStatus(lesson, lessons, progress) === "unlocked",
   );
   if (firstIncomplete) return firstIncomplete.id;
 

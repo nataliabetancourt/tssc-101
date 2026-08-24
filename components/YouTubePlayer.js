@@ -19,18 +19,21 @@ export default function YouTubePlayer({
   completed = false,
   initialMaxSeconds = 0,
   onProgress,
+  onEnded,
 }) {
   const hostRef = useRef(null);
   const playerRef = useRef(null);
   const maxWatchedRef = useRef(initialMaxSeconds);
   const completedRef = useRef(completed);
   const onProgressRef = useRef(onProgress);
+  const onEndedRef = useRef(onEnded);
   const durationRef = useRef(durationSeconds);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
 
   completedRef.current = completed;
   onProgressRef.current = onProgress;
+  onEndedRef.current = onEnded;
   durationRef.current = durationSeconds;
 
   useEffect(() => {
@@ -99,6 +102,7 @@ export default function YouTubePlayer({
           onStateChange(event) {
             if (event.data === YT.PlayerState.ENDED) {
               tick(YT, true);
+              onEndedRef.current?.();
             }
           },
         },
