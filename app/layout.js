@@ -1,10 +1,11 @@
 import { Geist, Geist_Mono } from "next/font/google";
 import { AuthProvider } from "@/context/AuthContext";
+import AppIntlProvider from "@/context/IntlProvider";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const geist = Geist({
+  variable: "--font-geist",
+  subsets: ["latin", "latin-ext"],
 });
 
 const geistMono = Geist_Mono({
@@ -15,16 +16,31 @@ const geistMono = Geist_Mono({
 export const metadata = {
   title: "Tire Store 101",
   description: "Internal employee training for TSSC tire and auto service.",
+  appleWebApp: {
+    capable: true,
+    title: "Tire Store 101",
+    statusBarStyle: "default",
+  },
+};
+
+export const viewport = {
+  themeColor: "#F7F7F8",
+  width: "device-width",
+  initialScale: 1,
+  colorScheme: "light",
 };
 
 export default function RootLayout({ children }) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geist.variable} ${geistMono.variable} min-h-full antialiased`}
+      suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col">
-        <AuthProvider>{children}</AuthProvider>
+      <body className="flex min-h-full flex-col overflow-x-hidden bg-canvas font-sans text-ink">
+        <AuthProvider>
+          <AppIntlProvider>{children}</AppIntlProvider>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 import { loadYouTubeApi, isPlaceholderYoutubeId, normalizeYoutubeId } from "@/lib/youtube";
 import { WATCH_COMPLETE_PERCENT } from "@/lib/progress";
 
-const YOUTUBE_ERRORS = {
-  2: "Invalid video id.",
-  5: "The HTML5 player failed.",
-  100: "This video was not found.",
-  101: "This video cannot be embedded.",
-  150: "This video cannot be embedded.",
+const YOUTUBE_ERROR_KEYS = {
+  2: "invalidId",
+  5: "html5",
+  100: "notFound",
+  101: "embed",
+  150: "embed",
 };
 
 export default function YouTubePlayer({
@@ -21,6 +22,7 @@ export default function YouTubePlayer({
   onProgress,
   onEnded,
 }) {
+  const t = useTranslations("Player");
   const hostRef = useRef(null);
   const playerRef = useRef(null);
   const maxWatchedRef = useRef(initialMaxSeconds);
@@ -29,7 +31,7 @@ export default function YouTubePlayer({
   const onEndedRef = useRef(onEnded);
   const durationRef = useRef(durationSeconds);
   const [ready, setReady] = useState(false);
-  const [error, setError] = useState("");
+  const [errorKey, setErrorKey] = useState("");
 
   completedRef.current = completed;
   onProgressRef.current = onProgress;
@@ -48,13 +50,11 @@ export default function YouTubePlayer({
 
     async function setup() {
       setReady(false);
-      setError("");
+      setErrorKey("");
 
       const resolvedId = normalizeYoutubeId(videoId);
       if (isPlaceholderYoutubeId(resolvedId)) {
-        setError(
-          "This lesson still has placeholder video data. Open Admin → Seed content and click Run seed, then refresh.",
-        );
+        setErrorKey("missing");
         return;
       }
 
@@ -94,10 +94,12 @@ export default function YouTubePlayer({
             if (cancelled) return;
             setReady(true);
             sizePlayer();
+            syncDuration();
+            tick(YT);
             pollId = window.setInterval(() => tick(YT), 500);
           },
           onError(event) {
-            setError(YOUTUBE_ERRORS[event.data] ?? "This video could not be played.");
+            setErrorKey(YOUTUBE_ERROR_KEYS[event.data] ?? "generic");
           },
           onStateChange(event) {
             if (event.data === YT.PlayerState.ENDED) {
@@ -121,10 +123,19 @@ export default function YouTubePlayer({
       player.setSize(Math.round(rect.width), Math.round(rect.height));
     }
 
+    function syncDuration() {
+      const player = playerRef.current;
+      const actual = Number(player?.getDuration?.());
+      if (Number.isFinite(actual) && actual > 1) {
+        durationRef.current = actual;
+      }
+    }
+
     function tick(YT, ended = false) {
       const player = playerRef.current;
       if (!player?.getCurrentTime) return;
 
+      syncDuration();
       const duration = durationRef.current || 1;
       let current = ended ? duration : player.getCurrentTime();
       if (!Number.isFinite(current)) return;
@@ -137,7 +148,7 @@ export default function YouTubePlayer({
       }
 
       if (ended) {
-        maxWatchedRef.current = Math.max(maxWatchedRef.current, duration * 0.9);
+        maxWatchedRef.current = duration;
       }
 
       const watchedPercent = Math.min(
@@ -153,7 +164,10 @@ export default function YouTubePlayer({
     }
 
     setup().catch((err) => {
-      if (!cancelled) setError(err.message ?? "Could not load the YouTube player.");
+      if (cancelled) return;
+      const message = err.message ?? "";
+      if (/timed out/i.test(message)) setErrorKey("timeout");
+      else setErrorKey("generic");
     });
 
     return () => {
@@ -171,16 +185,17 @@ export default function YouTubePlayer({
   }, [videoId]);
 
   return (
-    <div className="relative mx-auto aspect-[9/16] w-full max-w-[360px] overflow-hidden rounded-xl bg-black">
+    <div className="relative mx-auto aspect-[9/16] w-full max-w-[min(360px,100%)] overflow-hidden rounded-[20px] bg-ink">
       <div ref={hostRef} className="youtube-host absolute inset-0 h-full w-full" />
-      {!ready && !error ? (
-        <p className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-white">
-          Loading video…
-        </p>
+      {!ready && !errorKey ? (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-white">
+          <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+          <p>{t("loading")}</p>
+        </div>
       ) : null}
-      {error ? (
+      {errorKey ? (
         <p className="absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-white">
-          {error}
+          {t(errorKey)}
         </p>
       ) : null}
     </div>

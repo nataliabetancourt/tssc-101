@@ -1,11 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { useTranslations } from "next-intl";
 import ProtectedRoute from "@/components/ProtectedRoute";
-import LogoutButton from "@/components/LogoutButton";
 import YouTubePlayer from "@/components/YouTubePlayer";
 import LessonQuiz from "@/components/LessonQuiz";
+import LoadingScreen, {
+  EmptyState,
+  ErrorBanner,
+  InlineLoader,
+} from "@/components/LoadingScreen";
+import StatusChip from "@/components/StatusChip";
+import LessonOutline from "@/components/LessonOutline";
+import ModuleList from "@/components/ModuleList";
+import AppHeader from "@/components/AppHeader";
+import FeaturedLesson from "@/components/FeaturedLesson";
+import LearnerNav from "@/components/LearnerNav";
+import FadeIn from "@/components/FadeIn";
+import { ProgressBar, ProgressRing } from "@/components/ui";
+import { IconCheck, IconChevronLeft } from "@/components/icons";
 import { useAuth } from "@/context/AuthContext";
 import {
   loadCourse,
@@ -22,7 +35,11 @@ import {
   isCourseComplete,
   lessonHasQuiz,
   mergeLessonProgress,
+  sortLessons,
 } from "@/lib/progress";
+import { resolveLessonVideoId } from "@/lib/youtube";
+import { groupLessonsByModule } from "@/lib/cms";
+import { localizeLesson, localizeQuestion } from "@/lib/localize";
 
 export default function DashboardPage() {
   return (
@@ -34,21 +51,31 @@ export default function DashboardPage() {
 
 function CourseHome() {
   const { user, profile } = useAuth();
+  const t = useTranslations("Dashboard");
+  const tCommon = useTranslations("Common");
+  const tStatus = useTranslations("Status");
+  const tErrors = useTranslations("Errors");
   const [course, setCourse] = useState(null);
   const [lessons, setLessons] = useState([]);
   const [progress, setProgress] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
-  const [questions, setQuestions] = useState([]);
+  const [questionState, setQuestionState] = useState({
+    lessonId: null,
+    items: [],
+  });
   const [questionsLoading, setQuestionsLoading] = useState(false);
   const [stage, setStage] = useState("video");
+  const [view, setView] = useState("home");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [outlineOpen, setOutlineOpen] = useState(false);
   const lastSaveRef = useRef(0);
   const progressRef = useRef(progress);
   const lessonsRef = useRef(lessons);
   const latestUpdateRef = useRef(null);
-  progressRef.current = progress;
-  lessonsRef.current = lessons;
+  // Mirror latest progress for the player tick handler without rerendering it.
+  progressRef.current = progress; // eslint-disable-line react-hooks/refs
+  lessonsRef.current = lessons; // eslint-disable-line react-hooks/refs
 
   useEffect(() => {
     let cancelled = false;
@@ -72,14 +99,12 @@ function CourseHome() {
           setError(
             progressErr.code === "permission-denied" ||
               /insufficient permissions/i.test(progressErr.message ?? "")
-              ? "Watch progress is blocked by Firestore rules. Publish the latest firestore.rules (they must allow users/{userId}/progress/{courseId}), then refresh."
-              : progressErr.message ?? "Could not load watch progress.",
+              ? "progressPermission"
+              : "loadProgress",
           );
         }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err.message ?? "Could not load the course.");
-        }
+      } catch {
+        if (!cancelled) setError("loadCourse");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -101,13 +126,36 @@ function CourseHome() {
     };
   }, [user.uid]);
 
-  const selectedLesson = useMemo(
-    () => lessons.find((lesson) => lesson.id === selectedId) ?? null,
-    [lessons, selectedId],
+  const orderedLessons = useMemo(
+    () =>
+      sortLessons(lessons).map((lesson) =>
+        localizeLesson(lesson, profile?.language),
+      ),
+    [lessons, profile?.language],
   );
+  const lessonModules = useMemo(
+    () => groupLessonsByModule(orderedLessons),
+    [orderedLessons],
+  );
+  const selectedLesson = useMemo(
+    () => orderedLessons.find((lesson) => lesson.id === selectedId) ?? null,
+    [orderedLessons, selectedId],
+  );
+  const selectedIndex = orderedLessons.findIndex(
+    (lesson) => lesson.id === selectedId,
+  );
+  const previousLesson =
+    selectedIndex > 0 ? orderedLessons[selectedIndex - 1] : null;
+  const nextLesson =
+    selectedIndex >= 0 && selectedIndex < orderedLessons.length - 1
+      ? orderedLessons[selectedIndex + 1]
+      : null;
+  const nextLocked =
+    !nextLesson ||
+    getLessonStatus(nextLesson, orderedLessons, progress) === "locked";
 
   const selectedStatus = selectedLesson
-    ? getLessonStatus(selectedLesson, lessons, progress)
+    ? getLessonStatus(selectedLesson, orderedLessons, progress)
     : "locked";
   const selectedProgress = progress?.lessons?.[selectedId] ?? {
     watchedPercent: 0,
@@ -130,6 +178,9 @@ function CourseHome() {
     lessonHasQuiz(selectedLesson) &&
     selectedProgress.quizPassed !== true;
   const showingQuiz = showQuiz && stage === "quiz";
+  const questions =
+    questionState.lessonId === selectedId ? questionState.items : [];
+  const videoId = resolveLessonVideoId(selectedLesson, profile?.language);
 
   useEffect(() => {
     const lesson = lessonsRef.current.find((item) => item.id === selectedId);
@@ -147,20 +198,19 @@ function CourseHome() {
 
   useEffect(() => {
     if (!showQuiz || !selectedId) {
-      setQuestions([]);
       return;
     }
 
     let cancelled = false;
-    setQuestionsLoading(true);
+    setQuestionsLoading(true); // eslint-disable-line react-hooks/set-state-in-effect
     loadQuestions(selectedId)
       .then((nextQuestions) => {
-        if (!cancelled) setQuestions(nextQuestions);
-      })
-      .catch((err) => {
         if (!cancelled) {
-          setError(err.message ?? "Could not load the quiz.");
+          setQuestionState({ lessonId: selectedId, items: nextQuestions });
         }
+      })
+      .catch(() => {
+        if (!cancelled) setError("loadQuiz");
       })
       .finally(() => {
         if (!cancelled) setQuestionsLoading(false);
@@ -234,8 +284,8 @@ function CourseHome() {
       }
 
       lastSaveRef.current = now;
-      persistProgress(selectedId, update).catch((err) => {
-        setError(err.message ?? "Could not save progress.");
+      persistProgress(selectedId, update).catch(() => {
+        setError("saveProgress");
       });
     },
     [persistProgress, selectedId],
@@ -243,80 +293,208 @@ function CourseHome() {
 
   async function handleQuizPass() {
     if (!selectedId) return;
-    await persistProgress(selectedId, {
+    const next = orderedLessons[selectedIndex + 1];
+    const persist = persistProgress(selectedId, {
       quizPassed: true,
       watchCompleted: true,
       watchedPercent: selectedProgress.watchedPercent ?? 100,
       lastPositionSeconds: selectedProgress.lastPositionSeconds ?? 0,
     });
+    if (next) {
+      setSelectedId(next.id);
+      setStage("video");
+      setView("lesson");
+    } else {
+      setView("home");
+    }
+    await persist;
+  }
+
+  function openLesson(lessonId) {
+    setSelectedId(lessonId);
+    setView("lesson");
+  }
+
+  function statusLabel(status) {
+    if (status === "completed") return tStatus("done");
+    if (status === "locked") return tStatus("locked");
+    if (status === "quiz") return tStatus("quiz");
+    return tStatus("watch");
   }
 
   if (loading) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-white px-6 text-gray-600">
-        Loading course…
-      </main>
-    );
+    return <LoadingScreen label={t("loadingCourse")} />;
   }
 
   if (error && !course) {
     return (
-      <main className="min-h-screen bg-white px-6 py-10 text-gray-900">
-        <p className="mx-auto max-w-md rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-          {error}
-        </p>
+      <main className="min-h-screen bg-canvas px-6 py-10">
+        <ErrorBanner>{tErrors(error)}</ErrorBanner>
       </main>
     );
   }
 
+  const showingLesson =
+    view === "lesson" && selectedLesson && selectedStatus !== "locked";
+  const selectedModuleTitle =
+    selectedLesson?.displayModuleTitle || selectedLesson?.moduleTitle;
+  const watchPercent = Math.round(selectedProgress.watchedPercent ?? 0);
+  const remaining = Math.max(0, requiredCount - completedCount);
+  const remainingSeconds = orderedLessons
+    .filter((lesson) => getLessonStatus(lesson, orderedLessons, progress) !== "completed")
+    .reduce((sum, lesson) => sum + (Number(lesson.durationSeconds) || 0), 0);
+  const remainingMinutes = remainingSeconds
+    ? Math.max(1, Math.round(remainingSeconds / 60))
+    : 0;
+  const resumeId = pickDefaultLesson(orderedLessons, progress);
+  const resumeLesson =
+    orderedLessons.find((lesson) => lesson.id === resumeId) ?? selectedLesson;
+  const resumeStatus = resumeLesson
+    ? getLessonStatus(resumeLesson, orderedLessons, progress)
+    : "locked";
+  const resumeWatched = Math.round(
+    progress?.lessons?.[resumeLesson?.id]?.watchedPercent ?? 0,
+  );
+  const resumeMinutes = resumeLesson?.durationSeconds
+    ? Math.max(1, Math.round(Number(resumeLesson.durationSeconds) / 60))
+    : remainingMinutes;
+  const primaryActionLabel = courseComplete
+    ? t("reviewCourse")
+    : completedCount === 0
+      ? t("startCourse")
+      : resumeStatus === "quiz"
+        ? t("continueQuiz")
+        : t("continueLesson");
+
   return (
-    <main className="min-h-screen bg-white px-6 py-8 text-gray-900">
-      <div className="mx-auto flex w-full max-w-md flex-col gap-6">
-        <header className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-sm text-gray-600">Hi, {profile?.name}</p>
-            <h1 className="text-2xl font-semibold">
-              {course?.title ?? "Tire Store 101"}
-            </h1>
-          </div>
-          <LogoutButton className="min-h-10 shrink-0 px-3 text-sm" />
-        </header>
+    <main className="min-h-screen bg-canvas pb-[calc(4.25rem+env(safe-area-inset-bottom))] text-ink">
+      <AppHeader
+        title={
+          showingLesson
+            ? selectedLesson?.displayTitle || selectedLesson?.title || tCommon("appName")
+            : tCommon("appName")
+        }
+        back={
+          showingLesson ? (
+            <button
+              type="button"
+              onClick={() => setView("home")}
+              className="flex h-10 w-10 items-center justify-center text-ink"
+              aria-label={t("backToHome")}
+            >
+              <IconChevronLeft className="h-5 w-5" />
+            </button>
+          ) : null
+        }
+      />
 
-        {showCourseNewBadge ? (
-          <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900">
-            New lesson added
-          </p>
+      <div className="mx-auto flex w-full max-w-lg flex-col">
+        {!showingLesson ? (
+          <div className="flex flex-col gap-8 px-5 py-6">
+            <FadeIn className="flex items-end justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-[13px] text-muted">
+                  {greeting(t, profile?.name || "")}
+                </p>
+                <h1 className="display mt-1">{course?.title ?? tCommon("appName")}</h1>
+                <p className="stat mt-3 text-[13px] text-muted">
+                  <span className="text-ink">{completedCount}</span>
+                  /{requiredCount}
+                  {remaining > 0 && remainingMinutes
+                    ? ` · ${t("minutes", { count: remainingMinutes })}`
+                    : ""}
+                </p>
+              </div>
+              <div className="relative shrink-0">
+                <ProgressRing value={coursePercent} label={t("courseProgress")} />
+                <span className="stat absolute inset-0 flex items-center justify-center text-[11px] font-medium">
+                  {coursePercent}%
+                </span>
+              </div>
+            </FadeIn>
+
+            {showCourseNewBadge ? (
+              <p className="text-sm font-medium text-warning">{t("newLesson")}</p>
+            ) : null}
+
+            {courseComplete ? (
+              <FadeIn delay={0.04} className="flex items-start gap-3">
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-success-soft text-success">
+                  <IconCheck className="h-4 w-4" />
+                </span>
+                <div>
+                  <p className="text-[15px] font-semibold tracking-[-0.02em]">
+                    {t("courseComplete")}
+                  </p>
+                  <p className="mt-1 text-sm leading-relaxed text-muted">
+                    {t("courseCompleteBody")}
+                  </p>
+                </div>
+              </FadeIn>
+            ) : null}
+
+            {resumeLesson ? (
+              <FadeIn delay={0.06}>
+                <FeaturedLesson
+                  lesson={resumeLesson}
+                  language={profile?.language}
+                  actionLabel={primaryActionLabel}
+                  remainingMinutes={resumeMinutes}
+                  watchedPercent={resumeWatched}
+                  complete={courseComplete}
+                  onContinue={() => openLesson(resumeLesson.id)}
+                />
+              </FadeIn>
+            ) : null}
+
+            {orderedLessons.length === 0 ? (
+              <EmptyState title={t("emptyTitle")} body={t("emptyBody")} />
+            ) : (
+              <FadeIn delay={0.1}>
+                <p className="kicker mb-1">{t("modules")}</p>
+                <ModuleList
+                  modules={lessonModules}
+                  orderedLessons={orderedLessons}
+                  progress={progress}
+                  selectedId={resumeLesson?.id ?? selectedId}
+                  newLessons={newLessons}
+                  onSelect={openLesson}
+                />
+              </FadeIn>
+            )}
+
+            <ErrorBanner>{error ? tErrors(error) : null}</ErrorBanner>
+          </div>
         ) : null}
 
-        {courseComplete ? (
-          <p className="rounded-lg bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
-            ✓ Course complete
-          </p>
-        ) : null}
+        {showingLesson ? (
+          <section className="flex flex-col">
+            <div className="flex items-center justify-between gap-3 px-5 py-3">
+              <div className="min-w-0">
+                {selectedModuleTitle ? (
+                  <p className="kicker">{selectedModuleTitle}</p>
+                ) : null}
+                <p className="stat mt-1 text-[12px] text-muted">
+                  {selectedIndex + 1}/{orderedLessons.length}
+                </p>
+              </div>
+              <StatusChip
+                status={selectedStatus}
+                label={statusLabel(selectedStatus)}
+              />
+            </div>
+            <div className="px-5">
+              <ProgressBar
+                value={watchPercent}
+                label={t("watchedPercent", { percent: watchPercent })}
+              />
+            </div>
 
-        <section>
-          <div className="mb-2 flex items-center justify-between text-sm">
-            <span className="font-medium">Course progress</span>
-            <span className="text-gray-600">
-              {completedCount} of {requiredCount} complete
-            </span>
-          </div>
-          <div className="h-2 overflow-hidden rounded-full bg-gray-200">
-            <div
-              className="h-full rounded-full bg-gray-900"
-              style={{ width: `${Math.min(100, coursePercent)}%` }}
-            />
-          </div>
-        </section>
-
-        {selectedLesson && selectedStatus !== "locked" ? (
-          <section className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">{selectedLesson.title}</h2>
             {!showingQuiz ? (
-              <>
+              <div className="mt-4">
                 <YouTubePlayer
-                  key={selectedLesson.id}
-                  videoId={selectedLesson.youtubeId}
+                  key={`${selectedLesson.id}-${videoId}`}
+                  videoId={videoId}
                   durationSeconds={selectedLesson.durationSeconds || 1}
                   completed={Boolean(selectedProgress.watchCompleted)}
                   startSeconds={
@@ -325,8 +503,9 @@ function CourseHome() {
                       : (selectedProgress.lastPositionSeconds ?? 0)
                   }
                   initialMaxSeconds={
-                    ((selectedProgress.watchedPercent ?? 0) / 100) *
-                    (selectedLesson.durationSeconds || 1)
+                    selectedProgress.watchCompleted
+                      ? selectedLesson.durationSeconds || 0
+                      : (selectedProgress.lastPositionSeconds ?? 0)
                   }
                   onProgress={handleProgress}
                   onEnded={() => {
@@ -338,135 +517,115 @@ function CourseHome() {
                     }
                   }}
                 />
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-sm">
-                    <span>Video</span>
-                    <span className="text-gray-600">
-                      {Math.round(selectedProgress.watchedPercent ?? 0)}% watched
-                    </span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-gray-200">
-                    <div
-                      className="h-full rounded-full bg-gray-900"
-                      style={{
-                        width: `${Math.min(100, selectedProgress.watchedPercent ?? 0)}%`,
-                      }}
-                    />
-                  </div>
-                  {!selectedProgress.watchCompleted ? (
-                    <p className="mt-2 text-sm text-gray-600">
-                      Watch the video. The quiz starts when it ends.
-                    </p>
-                  ) : selectedProgress.lessonCompleted ? (
-                    <p className="mt-2 text-sm text-green-700">
-                      Lesson complete. You can replay this video anytime.
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-sm text-gray-600">
-                      Watch complete. Continue to the quiz when you are ready.
-                    </p>
-                  )}
+                <div className="px-5 py-4">
+                  <p className="text-sm leading-relaxed text-muted">
+                    {!selectedProgress.watchCompleted
+                      ? t("watchThenQuiz")
+                      : selectedProgress.lessonCompleted
+                        ? t("lessonCompleteReplay")
+                        : t("watchCompleteContinue")}
+                  </p>
+                  {showQuiz ? (
+                    <button
+                      type="button"
+                      onClick={() => setStage("quiz")}
+                      className="btn btn-primary mt-4 w-full"
+                    >
+                      {t("continueQuiz")}
+                    </button>
+                  ) : null}
                 </div>
-                {showQuiz ? (
-                  <button
-                    type="button"
-                    onClick={() => setStage("quiz")}
-                    className="min-h-12 w-full rounded-lg bg-gray-900 text-base font-medium text-white"
-                  >
-                    Continue to quiz
-                  </button>
-                ) : null}
-              </>
-            ) : null}
-
-            {showingQuiz && questionsLoading && questions.length === 0 ? (
-              <p className="text-sm text-gray-600">Loading quiz…</p>
-            ) : null}
-            {showQuiz && questions.length > 0 ? (
-              <div className={showingQuiz ? "" : "hidden"}>
-                <LessonQuiz
-                  key={selectedLesson.id}
-                  questions={questions}
-                  onPass={handleQuizPass}
-                  onBackToVideo={() => setStage("video")}
-                />
               </div>
             ) : null}
-            {showingQuiz && !questionsLoading && questions.length === 0 ? (
-              <p className="text-sm text-gray-600">
-                No quiz questions found for this lesson.
-              </p>
+
+            {showingQuiz ? (
+              <div className="px-5 py-4">
+                {questionsLoading && questions.length === 0 ? (
+                  <InlineLoader label={t("loadingQuiz")} />
+                ) : null}
+                {questions.length > 0 ? (
+                  <LessonQuiz
+                    key={`${selectedLesson.id}-${profile?.language ?? "en"}`}
+                    questions={questions.map((question) =>
+                      localizeQuestion(
+                        question,
+                        profile?.language,
+                        selectedLesson.id,
+                      ),
+                    )}
+                    onPass={handleQuizPass}
+                    onBackToVideo={() => setStage("video")}
+                  />
+                ) : null}
+                {!questionsLoading && questions.length === 0 ? (
+                  <p className="text-sm text-muted">{t("noQuestions")}</p>
+                ) : null}
+              </div>
             ) : null}
+
+            {!showingQuiz ? (
+              <div className="flex items-center justify-between gap-3 px-5 pb-6">
+                <button
+                  type="button"
+                  disabled={!previousLesson}
+                  onClick={() =>
+                    previousLesson && setSelectedId(previousLesson.id)
+                  }
+                  className="btn btn-text px-0"
+                >
+                  {tCommon("previous")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOutlineOpen(true)}
+                  className="btn btn-text px-0"
+                >
+                  {t("viewAllLessons")}
+                </button>
+                <button
+                  type="button"
+                  disabled={nextLocked}
+                  onClick={() => nextLesson && setSelectedId(nextLesson.id)}
+                  className="btn btn-text px-0"
+                >
+                  {tCommon("next")}
+                </button>
+              </div>
+            ) : null}
+            <div className="px-5">
+              <ErrorBanner>{error ? tErrors(error) : null}</ErrorBanner>
+            </div>
           </section>
         ) : null}
-
-        <section className="flex flex-col gap-2">
-          <h2 className="text-lg font-semibold">Lessons</h2>
-          {lessons.map((lesson) => {
-            const status = getLessonStatus(lesson, lessons, progress);
-            const watched = progress?.lessons?.[lesson.id]?.watchedPercent ?? 0;
-            const selected = lesson.id === selectedId;
-            const isNew = newLessons.some((item) => item.id === lesson.id);
-
-            return (
-              <button
-                key={lesson.id}
-                type="button"
-                disabled={status === "locked"}
-                onClick={() => setSelectedId(lesson.id)}
-                className={`flex min-h-14 w-full items-center justify-between rounded-lg border px-4 text-left text-base ${
-                  selected
-                    ? "border-gray-900 bg-gray-50"
-                    : "border-gray-300 bg-white"
-                } disabled:cursor-not-allowed disabled:opacity-50`}
-              >
-                <span>
-                  <span className="font-medium">
-                    {lesson.order}. {lesson.title}
-                  </span>
-                  {isNew ? (
-                    <span className="mt-0.5 block text-sm font-medium text-amber-800">
-                      New lesson added
-                    </span>
-                  ) : status !== "locked" ? (
-                    <span className="mt-0.5 block text-sm text-gray-600">
-                      {status === "quiz"
-                        ? "Quiz ready"
-                        : `${Math.round(watched)}% watched`}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="text-sm text-gray-600">
-                  {status === "completed"
-                    ? "Done"
-                    : status === "locked"
-                      ? "Locked"
-                      : status === "quiz"
-                        ? "Quiz"
-                        : "Watch"}
-                </span>
-              </button>
-            );
-          })}
-        </section>
-
-        {error ? (
-          <p className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </p>
-        ) : null}
-
-        {profile?.isAdmin ? (
-          <Link
-            href="/admin"
-            className="flex min-h-12 w-full items-center justify-center rounded-lg border border-gray-300 text-base font-medium"
-          >
-            Admin
-          </Link>
-        ) : null}
       </div>
+
+      <LearnerNav
+        view={showingLesson ? "lesson" : "home"}
+        onHome={() => setView("home")}
+        onLesson={() => resumeLesson && openLesson(resumeLesson.id)}
+        disabledLesson={!resumeLesson}
+      />
+
+      <LessonOutline
+        open={outlineOpen}
+        modules={lessonModules}
+        orderedLessons={orderedLessons}
+        progress={progress}
+        selectedId={selectedId}
+        newLessons={newLessons}
+        onSelect={openLesson}
+        onClose={() => setOutlineOpen(false)}
+        statusLabel={statusLabel}
+      />
     </main>
   );
+}
+
+function greeting(t, name) {
+  const hour = new Date().getHours();
+  if (hour < 12) return t("goodMorning", { name });
+  if (hour < 18) return t("goodAfternoon", { name });
+  return t("goodEvening", { name });
 }
 
 function pickDefaultLesson(lessons, progress) {
@@ -475,13 +634,11 @@ function pickDefaultLesson(lessons, progress) {
   );
   if (quizReady) return quizReady.id;
 
-  const firstIncomplete = lessons.find(
-    (lesson) => getLessonStatus(lesson, lessons, progress) === "unlocked",
-  );
+  const firstIncomplete = lessons.find((lesson) => {
+    const status = getLessonStatus(lesson, lessons, progress);
+    return status === "unlocked" || status === "quiz";
+  });
   if (firstIncomplete) return firstIncomplete.id;
 
-  const firstUnlocked = lessons.find(
-    (lesson) => getLessonStatus(lesson, lessons, progress) !== "locked",
-  );
-  return firstUnlocked?.id ?? lessons[0]?.id ?? null;
+  return lessons[0]?.id ?? null;
 }

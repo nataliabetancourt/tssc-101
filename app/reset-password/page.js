@@ -3,15 +3,21 @@
 import { Suspense, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { confirmPasswordReset } from "firebase/auth";
 import { auth } from "@/lib/firebase";
-import { firebaseAuthMessage } from "@/lib/authErrors";
-
-const fieldClass =
-  "w-full min-h-12 rounded-lg border border-gray-300 bg-white px-4 text-base text-gray-900";
+import { authErrorKey } from "@/lib/authErrors";
+import LoadingScreen, { ErrorBanner } from "@/components/LoadingScreen";
+import AuthShell, {
+  fieldClass,
+  primaryButtonClass,
+} from "@/components/AuthShell";
 
 function ResetPasswordForm() {
   const router = useRouter();
+  const t = useTranslations("Auth");
+  const tErrors = useTranslations("Errors");
+  const tCommon = useTranslations("Common");
   const searchParams = useSearchParams();
   const oobCode = useMemo(
     () => searchParams.get("oobCode") ?? "",
@@ -27,12 +33,12 @@ function ResetPasswordForm() {
     setError("");
 
     if (password !== confirm) {
-      setError("Passwords do not match.");
+      setError(t("passwordsMismatch"));
       return;
     }
 
     if (!oobCode) {
-      setError("This reset link is missing a code. Request a new one.");
+      setError(t("missingResetCode"));
       return;
     }
 
@@ -41,83 +47,72 @@ function ResetPasswordForm() {
       await confirmPasswordReset(auth, oobCode, password);
       router.replace("/login");
     } catch (err) {
-      setError(firebaseAuthMessage(err));
+      setError(tErrors(authErrorKey(err)));
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <main className="min-h-screen bg-white px-6 py-10 text-gray-900">
-      <div className="mx-auto flex w-full max-w-md flex-col gap-6">
-        <div>
-          <h1 className="text-2xl font-semibold">Set a new password</h1>
-          <p className="mt-1 text-gray-600">Choose a password of at least 6 characters.</p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <label className="flex flex-col gap-1 text-sm font-medium">
-            New password
-            <input
-              className={fieldClass}
-              type="password"
-              name="password"
-              autoComplete="new-password"
-              minLength={6}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-          </label>
-
-          <label className="flex flex-col gap-1 text-sm font-medium">
-            Confirm password
-            <input
-              className={fieldClass}
-              type="password"
-              name="confirmPassword"
-              autoComplete="new-password"
-              minLength={6}
-              value={confirm}
-              onChange={(event) => setConfirm(event.target.value)}
-              required
-            />
-          </label>
-
-          {error ? (
-            <p className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-              {error}
-            </p>
-          ) : null}
-
-          <button
-            type="submit"
-            disabled={submitting}
-            className="min-h-12 w-full rounded-lg bg-gray-900 text-base font-medium text-white disabled:opacity-60"
-          >
-            {submitting ? "Saving…" : "Save password"}
-          </button>
-        </form>
-
-        <p className="text-center text-sm text-gray-600">
-          <Link href="/forgot-password" className="font-medium text-gray-900 underline">
-            Request a new reset link
-          </Link>
-        </p>
+    <AuthShell>
+      <div className="mb-6">
+        <h1 className="text-[22px] font-semibold tracking-tight">
+          {t("resetTitle")}
+        </h1>
+        <p className="mt-1 text-sm text-muted">{t("resetHelp")}</p>
       </div>
-    </main>
+
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <label className="flex flex-col gap-1 text-sm font-medium">
+          {t("newPassword")}
+          <input
+            className={fieldClass}
+            type="password"
+            name="password"
+            autoComplete="new-password"
+            minLength={6}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm font-medium">
+          {t("confirmPassword")}
+          <input
+            className={fieldClass}
+            type="password"
+            name="confirmPassword"
+            autoComplete="new-password"
+            minLength={6}
+            value={confirm}
+            onChange={(event) => setConfirm(event.target.value)}
+            required
+          />
+        </label>
+
+        <ErrorBanner>{error}</ErrorBanner>
+
+        <button type="submit" disabled={submitting} className={`${primaryButtonClass} w-full`}>
+          {submitting ? tCommon("saving") : t("savePassword")}
+        </button>
+      </form>
+
+      <p className="mt-6 text-center text-sm text-muted">
+        <Link
+          href="/forgot-password"
+          className="inline-flex min-h-12 items-center font-semibold text-brand"
+        >
+          {t("requestNewLink")}
+        </Link>
+      </p>
+    </AuthShell>
   );
 }
 
 export default function ResetPasswordPage() {
   return (
-    <Suspense
-      fallback={
-        <main className="flex min-h-screen items-center justify-center bg-white text-gray-600">
-          Loading…
-        </main>
-      }
-    >
+    <Suspense fallback={<LoadingScreen />}>
       <ResetPasswordForm />
     </Suspense>
   );

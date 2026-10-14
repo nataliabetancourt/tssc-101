@@ -1,24 +1,51 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { NextIntlClientProvider, useTranslations } from "next-intl";
 import { createUserWithEmailAndPassword } from "firebase/auth";
 import { doc, setDoc, serverTimestamp } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
-import { firebaseAuthMessage } from "@/lib/authErrors";
+import { authErrorKey } from "@/lib/authErrors";
 import { LOCATIONS } from "@/lib/locations";
+import { ErrorBanner } from "@/components/LoadingScreen";
+import AuthShell, {
+  fieldClass,
+  primaryButtonClass,
+} from "@/components/AuthShell";
+import en from "@/messages/en.json";
+import es from "@/messages/es.json";
 
-const fieldClass =
-  "w-full min-h-12 rounded-lg border border-gray-300 bg-white px-4 text-base text-gray-900";
+const MESSAGES = { en, es };
 
 export default function SignupPage() {
+  const [language, setLanguage] = useState("en");
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
+
+  return (
+    <NextIntlClientProvider
+      locale={language}
+      messages={MESSAGES[language]}
+      timeZone="America/Chicago"
+    >
+      <SignupForm language={language} onLanguageChange={setLanguage} />
+    </NextIntlClientProvider>
+  );
+}
+
+function SignupForm({ language, onLanguageChange }) {
   const router = useRouter();
+  const t = useTranslations("Auth");
+  const tErrors = useTranslations("Errors");
+  const tCommon = useTranslations("Common");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [location, setLocation] = useState("");
-  const [language, setLanguage] = useState("en");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -39,23 +66,22 @@ export default function SignupPage() {
       });
       router.replace("/dashboard");
     } catch (err) {
-      setError(firebaseAuthMessage(err));
+      setError(tErrors(authErrorKey(err)));
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <main className="min-h-screen bg-white px-6 py-10 text-gray-900">
-      <div className="mx-auto flex w-full max-w-md flex-col gap-6">
-        <div>
-          <h1 className="text-2xl font-semibold">Create an account</h1>
-          <p className="mt-1 text-gray-600">Tire Store 101 training</p>
-        </div>
+    <AuthShell>
+      <div className="mb-6">
+        <h1 className="display">{t("signUpTitle")}</h1>
+        <p className="mt-2 text-sm text-muted">{tCommon("tagline")}</p>
+      </div>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <label className="flex flex-col gap-1 text-sm font-medium">
-            Name
+            {t("name")}
             <input
               className={fieldClass}
               type="text"
@@ -68,7 +94,7 @@ export default function SignupPage() {
           </label>
 
           <label className="flex flex-col gap-1 text-sm font-medium">
-            Email
+            {t("email")}
             <input
               className={fieldClass}
               type="email"
@@ -81,7 +107,7 @@ export default function SignupPage() {
           </label>
 
           <label className="flex flex-col gap-1 text-sm font-medium">
-            Password
+            {t("password")}
             <input
               className={fieldClass}
               type="password"
@@ -95,7 +121,7 @@ export default function SignupPage() {
           </label>
 
           <label className="flex flex-col gap-1 text-sm font-medium">
-            Location
+            {t("location")}
             <select
               className={fieldClass}
               name="location"
@@ -103,7 +129,7 @@ export default function SignupPage() {
               onChange={(event) => setLocation(event.target.value)}
               required
             >
-              <option value="">Select a store</option>
+              <option value="">{t("selectStore")}</option>
               {LOCATIONS.map((store) => (
                 <option key={store.slug} value={store.slug}>
                   {store.name}
@@ -113,41 +139,32 @@ export default function SignupPage() {
           </label>
 
           <label className="flex flex-col gap-1 text-sm font-medium">
-            Language
+            {t("language")}
             <select
               className={fieldClass}
               name="language"
               value={language}
-              onChange={(event) => setLanguage(event.target.value)}
+              onChange={(event) => onLanguageChange(event.target.value)}
               required
             >
-              <option value="en">English</option>
-              <option value="es">Español</option>
+              <option value="en">{t("english")}</option>
+              <option value="es">{t("spanish")}</option>
             </select>
           </label>
 
-          {error ? (
-            <p className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-              {error}
-            </p>
-          ) : null}
+          <ErrorBanner>{error}</ErrorBanner>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="min-h-12 w-full rounded-lg bg-gray-900 text-base font-medium text-white disabled:opacity-60"
-          >
-            {submitting ? "Creating account…" : "Sign up"}
+          <button type="submit" disabled={submitting} className={`${primaryButtonClass} w-full`}>
+            {submitting ? t("creatingAccount") : t("signUpAction")}
           </button>
         </form>
 
-        <p className="text-center text-sm text-gray-600">
-          Already have an account?{" "}
-          <Link href="/login" className="font-medium text-gray-900 underline">
-            Log in
+        <p className="mt-6 text-center text-sm text-muted">
+          {t("haveAccount")}{" "}
+          <Link href="/login" className="font-semibold text-brand">
+            {t("logInAction")}
           </Link>
         </p>
-      </div>
-    </main>
+    </AuthShell>
   );
 }
